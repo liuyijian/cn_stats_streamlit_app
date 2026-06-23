@@ -13,6 +13,7 @@ import pandas as pd
 import plotly.graph_objects as go
 from datetime import datetime, timedelta
 from typing import List, Dict, Any
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import time
 
 # ================================================================
@@ -175,32 +176,50 @@ def query_data_all_provinces(
     end_time: str,
     show_type: str = "1",
 ) -> list:
-    """分省数据查询：逐个查询 31 省，合并结果并标注省份。"""
+    """分省数据查询：并发查询 31 省，合并结果并标注省份。"""
     regions = sorted(PROVINCE_CODES.items(), key=lambda x: x[1])
     all_results = []
     total = len(regions)
 
-    status = st.empty()
-    for idx, (value, text) in enumerate(regions):
-        status.info(f"📡 查询进度 {idx+1}/{total}：{text}")
+    progress_bar = st.progress(0.0, text="准备查询...")
+    completed = 0
+
+    def _query_one(value: str, text: str) -> list:
+        """查询单个省份并标注地区"""
+        payload = {
+            "cid": cid,
+            "indicatorIds": indicator_ids,
+            "das": [{"text": text, "value": value}],
+            "dts": [f"{start_time}-{end_time}"],
+            "showType": show_type,
+            "rootId": ROOT_ID_MONTHLY,
+        }
         try:
-            payload = {
-                "cid": cid,
-                "indicatorIds": indicator_ids,
-                "das": [{"text": text, "value": value}],
-                "dts": [f"{start_time}-{end_time}"],
-                "showType": show_type,
-                "rootId": ROOT_ID_MONTHLY,
-            }
             data = _post_data(payload)
             for item in data:
                 item["reg"] = value
                 item["reg_name"] = text
-            all_results.extend(data)
+            return data
         except Exception:
-            pass
+            return []
 
-    status.empty()
+    with ThreadPoolExecutor(max_workers=10) as executor:
+        futures = {
+            executor.submit(_query_one, value, text): (value, text)
+            for value, text in regions
+        }
+        for future in as_completed(futures):
+            completed += 1
+            pct = completed / total
+            value, text = futures[future]
+            progress_bar.progress(pct, text=f"📡 查询中 {completed}/{total}：{text}")
+            try:
+                result = future.result()
+                all_results.extend(result)
+            except Exception:
+                pass
+
+    progress_bar.empty()
     return all_results
 
 
@@ -391,7 +410,7 @@ with st.sidebar:
             with col_a:
                 st.markdown(f"**📌 已选：** {st.session_state.selected_cid_name}")
             with col_b:
-                if st.button("✕ 清除", key="clear_selection", width="stretch"):
+                if st.button("✕ 清除", key="clear_selection", use_container_width=True):
                     st.session_state.selected_cid = None
                     st.session_state.selected_cid_name = ""
                     st.session_state.selected_indicators = {}
@@ -480,9 +499,9 @@ with st.sidebar:
                     leaf = flat_options[selected_idx]
                     already = (st.session_state.selected_cid == leaf["id"])
                     if already:
-                        st.button("✅ 已选中", key="select_leaf", width="stretch", disabled=True)
+                        st.button("✅ 已选中", key="select_leaf", use_container_width=True, disabled=True)
                     else:
-                        if st.button("📄 选此数据集", key="select_leaf", width="stretch"):
+                        if st.button("📄 选此数据集", key="select_leaf", use_container_width=True):
                             st.session_state.selected_cid = leaf["id"]
                             st.session_state.selected_cid_name = leaf["name"]
                             st.session_state.selected_indicators = {}
@@ -490,7 +509,7 @@ with st.sidebar:
                 else:
                     # 文件夹 → 一键进入
                     folder = flat_options[selected_idx]
-                    if st.button(f"📂 打开「{folder['name']}」", key="enter_folder", width="stretch"):
+                    if st.button(f"📂 打开「{folder['name']}」", key="enter_folder", use_container_width=True):
                         try:
                             children = query_tree(folder["id"], code)
                             if children:
@@ -507,13 +526,13 @@ with st.sidebar:
 
             with col_b:
                 if st.session_state.tree_history:
-                    if st.button("← 返回", key="back_tree", width="stretch"):
+                    if st.button("← 返回", key="back_tree", use_container_width=True):
                         prev_tree, prev_path = st.session_state.tree_history.pop()
                         st.session_state.current_tree = prev_tree
                         st.session_state.tree_path_names = prev_path
                         st.rerun()
                 else:
-                    if st.button("🏠 首页", key="home_tree", width="stretch"):
+                    if st.button("🏠 首页", key="home_tree", use_container_width=True):
                         st.session_state.tree_history = []
                         st.session_state.tree_path_names = []
                         st.session_state.current_tree = []
@@ -606,7 +625,7 @@ with st.container(border=True):
         query_btn = st.button(
             "🚀 查询数据",
             type="primary",
-            width="stretch",
+            use_container_width=True,
             disabled=(
                 st.session_state.selected_cid is None
                 or len(st.session_state.selected_indicators) == 0
@@ -764,7 +783,7 @@ if st.session_state.query_df is not None and not st.session_state.query_df.empty
         # 准备展示用 DataFrame（去掉编码列和不需要的列）
         display_df = df.drop(columns=[c for c in df.columns if c.endswith("_unit") or c == "code"], errors="ignore")
 
-        st.dataframe(display_df, width="stretch", hide_index=True)
+        st.dataframe(display_df, use_container_width=True, hide_index=True)
 
         # CSV 导出
         csv_data = display_df.to_csv(index=False, encoding="utf-8-sig")
@@ -775,7 +794,7 @@ if st.session_state.query_df is not None and not st.session_state.query_df.empty
             data=csv_data,
             file_name=f"国家统计局_{dataset_tag}_{time_tag}.csv",
             mime="text/csv",
-            width="stretch",
+            use_container_width=True,
         )
 
 # ================================================================
